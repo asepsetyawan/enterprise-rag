@@ -1,0 +1,61 @@
+scope: cnf-rag-postgres
+namespace: /service/
+name: {{ inventory_hostname }}
+restapi:
+  listen: '{{ ansible_host }}:8008'
+  connect_address: '{{ ansible_host }}:8008'
+  certfile: /etc/patroni/tls/server.crt
+  keyfile: /etc/patroni/tls/server.key
+  cafile: /etc/patroni/tls/ca.crt
+  verify_client: required
+  authentication: {username: patroni-operator, password: '{{ vault_patroni_api_password }}'}
+etcd3:
+  hosts: [{% for host in groups['etcd_nodes'] %}'{{ hostvars[host].ansible_host }}:2379'{% if not loop.last %},{% endif %}{% endfor %}]
+  protocol: https
+  cacert: /etc/patroni/tls/ca.crt
+  cert: /etc/patroni/tls/client.crt
+  key: /etc/patroni/tls/client.key
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    synchronous_mode: true
+    synchronous_mode_strict: true
+    synchronous_node_count: 1
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        wal_level: replica
+        hot_standby: 'on'
+        max_wal_senders: 10
+        max_replication_slots: 10
+        archive_mode: 'on'
+        archive_command: 'pgbackrest --stanza=enterprise archive-push %p'
+        archive_timeout: 60s
+        password_encryption: scram-sha-256
+        ssl: 'on'
+        ssl_cert_file: /etc/patroni/tls/server.crt
+        ssl_key_file: /etc/patroni/tls/server.key
+        ssl_ca_file: /etc/patroni/tls/ca.crt
+        max_connections: 300
+  initdb: [{encoding: UTF8}, {data-checksums: true}]
+  pg_hba:
+    - 'local all postgres peer'
+    - 'hostssl replication replicator {{ rag_db_subnet }} scram-sha-256'
+    - 'hostssl all all {{ rag_app_subnet }} scram-sha-256'
+    - 'hostssl all postgres {{ rag_admin_subnet }} scram-sha-256'
+    - 'host all all 0.0.0.0/0 reject'
+postgresql:
+  listen: '{{ ansible_host }}:5432'
+  connect_address: '{{ ansible_host }}:5432'
+  data_dir: /var/lib/postgresql/18/patroni
+  bin_dir: /usr/lib/postgresql/18/bin
+  authentication:
+    superuser: {username: postgres, password: '{{ vault_pg_admin_password }}'}
+    replication: {username: replicator, password: '{{ vault_pg_replication_password }}'}
+  parameters:
+    unix_socket_directories: /var/run/postgresql
+tags: {nofailover: false, noloadbalance: false, clonefrom: false, nosync: false}

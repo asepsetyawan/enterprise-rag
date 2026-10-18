@@ -1,0 +1,85 @@
+---
+- name: Validate immutable release inputs
+  hosts: rag_apps
+  serial: 1
+  become: true
+  pre_tasks:
+    - name: Fail closed on sample configuration
+      ansible.builtin.assert:
+        that:
+          - "'@sha256:' in rag_image"
+          - "'REPLACE' not in rag_image"
+          - "'.example' not in rag_public_origin"
+          - "rag_public_origin.startswith('https://')"
+          - "rag_oidc_required_acr | length > 0"
+          - "rag_llm_digest is match('^[0-9a-f]{64}$')"
+          - "rag_embedding_digest is match('^[0-9a-f]{64}$')"
+    - name: Require mounted source and audit storage (mount managed by infrastructure team)
+      ansible.builtin.command: "mountpoint -q {{ item }}"
+      loop: [/srv/rag/files, /srv/rag/audit-export]
+      changed_when: false
+  tasks:
+    - name: Create release folders
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "10001"
+        group: "10001"
+        mode: "{{ item.mode }}"
+      loop:
+        - {path: /opt/enterprise-rag, mode: '0750'}
+        - {path: /opt/enterprise-rag/secrets, mode: '0700'}
+        - {path: /srv/rag/runtime, mode: '0700'}
+    - name: Install secrets from approved secret export
+      ansible.builtin.copy:
+        src: "{{ rag_secret_source }}/{{ item }}"
+        dest: "/opt/enterprise-rag/secrets/{{ item }}"
+        owner: "10001"
+        group: "10001"
+        mode: '0400'
+      no_log: true
+      loop: [app_dsn, worker_dsn, session_secret, internal_token, audit_hmac_key, metrics_token, oidc_client_secret, tenant-stores.json]
+    - name: Write production compose manifest
+      ansible.builtin.template:
+        src: compose.production.yml.j2
+        dest: /opt/enterprise-rag/compose.yaml
+        mode: '0640'
+    - name: Save previous immutable release
+      ansible.builtin.shell: 'docker inspect --format="{% raw %}{{.Config.Image}}{% endraw %}" cnf-rag-api-1 > previous-image.txt || true'
+      args: {chdir: /opt/enterprise-rag}
+      changed_when: false
+    - name: Pull tested artifact
+      ansible.builtin.command: docker compose pull
+      args: {chdir: /opt/enterprise-rag}
+      changed_when: true
+    - name: Replace this application node after prior node is healthy
+      ansible.builtin.command: docker compose up -d --remove-orphans
+      args: {chdir: /opt/enterprise-rag}
+      changed_when: true
+    - name: Wait for dependencies and model digest validation
+      ansible.builtin.uri: {url: 'http://127.0.0.1:8088/health/ready', status_code: 200}
+      register: readiness
+      retries: 30
+      delay: 10
+      until: readiness.status == 200
+    - name: Record deployed release
+      ansible.builtin.copy:
+        content: "{{ rag_image }}\n"
+        dest: /opt/enterprise-rag/current-image.txt
+        mode: '0640'
+
+- name: Configure TLS edge load balancers
+  hosts: rag_edges
+  serial: 1
+  become: true
+  tasks:
+    - name: Render validated HAProxy configuration
+      ansible.builtin.template:
+        src: ../haproxy/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        validate: haproxy -c -f %s
+        mode: '0640'
+      notify: reload haproxy
+  handlers:
+    - name: reload haproxy
+      ansible.builtin.service: {name: haproxy, state: reloaded}

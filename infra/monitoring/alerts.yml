@@ -1,0 +1,28 @@
+groups:
+  - name: enterprise-rag
+    rules:
+      - alert: RagServiceDown
+        expr: up{job=~"rag-.*"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: 'RAG dependency scrape failed; inspect readiness and node health'}
+      - alert: RagWorkerStalled
+        expr: time() - rag_worker_heartbeat_timestamp_seconds > 2100
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: 'Worker has not completed a queue cycle within the hard ingestion timeout'}
+      - alert: RagDeadLetter
+        expr: rag_job_backlog{status="dead_letter"} > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: 'Ingestion requires operator review and explicit retry'}
+      - alert: RagApiErrors
+        expr: sum(rate(rag_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(rag_http_requests_total[5m])),0.01) > 0.05
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: 'RAG API 5xx rate exceeds 5 percent'}
+      - alert: RagAuditDeliveryBacklog
+        expr: rag_audit_pending > 1000
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: 'Audit export backlog exceeds threshold; inspect archive or SIEM sink'}

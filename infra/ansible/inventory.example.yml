@@ -1,0 +1,39 @@
+all:
+  vars:
+    ansible_user: deploy
+    rag_hostname: knowledge.corp.example
+    # Pin the tested CI image digest, not a mutable latest tag.
+    rag_image: registry.corp.example/cnf/enterprise-rag@sha256:REPLACE_DIGEST
+    rag_public_origin: https://knowledge.corp.example
+    rag_oidc_issuer: https://sso.corp.example/realms/employees
+    rag_oidc_client_id: rag-portal
+    rag_oidc_required_acr: "2"
+    rag_llm_digest: REPLACE_64_HEX_DIGEST
+    rag_embedding_digest: REPLACE_64_HEX_DIGEST
+    rag_ollama_hosts: http://10.60.30.11:11434,http://10.60.30.12:11434
+    rag_pg_host: 10.60.20.10
+    rag_pg_port: 5432
+    rag_nas_source: 10.60.40.10:/enterprise-rag
+    rag_audit_source: 10.60.40.20:/audit-rag
+    rag_secret_source: /secure/enterprise-rag
+    rag_otlp_endpoint: http://10.60.50.10:4318
+    rag_antivirus_host: 10.60.50.20
+  children:
+    rag_apps:
+      hosts:
+        rag-app-01: {ansible_host: 10.60.10.11}
+        rag-app-02: {ansible_host: 10.60.10.12}
+    rag_edges:
+      hosts:
+        rag-edge-01: {ansible_host: 10.60.10.21}
+        rag-edge-02: {ansible_host: 10.60.10.22}
+    postgres_nodes:
+      hosts:
+        pg-01: {ansible_host: 10.60.20.11}
+        pg-02: {ansible_host: 10.60.20.12}
+        pg-03: {ansible_host: 10.60.20.13}
+    etcd_nodes:
+      hosts:
+        etcd-01: {ansible_host: 10.60.21.11}
+        etcd-02: {ansible_host: 10.60.21.12}
+        etcd-03: {ansible_host: 10.60.21.13}

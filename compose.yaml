@@ -1,0 +1,41 @@
+name: cnf-enterprise-rag
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_DB: enterprise
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets: [pg_password]
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./.secrets/postgres-init.sql:/docker-entrypoint-initdb.d/010-platform.sql:ro
+    ports: ["127.0.0.1:15432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d enterprise"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1
+    profiles: ["identity"]
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_HOSTNAME: http://localhost:8089
+      KC_HEALTH_ENABLED: "true"
+    entrypoint: ["/bin/bash", "-c", "export KC_DB_PASSWORD=$$(cat /run/secrets/keycloak_password); exec /opt/keycloak/bin/kc.sh start-dev --import-realm"]
+    secrets: [keycloak_password]
+    volumes:
+      - ./.secrets/keycloak-realm.json:/opt/keycloak/data/import/enterprise-rag-realm.json:ro
+    ports: ["127.0.0.1:8089:8080"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: unless-stopped
+secrets:
+  pg_password: {file: ./.secrets/pg_password}
+  keycloak_password: {file: ./.secrets/keycloak_password}
+volumes:
+  postgres_data:

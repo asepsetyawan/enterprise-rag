@@ -1,0 +1,19 @@
+[global]
+repo1-type=s3
+repo1-s3-endpoint={{ rag_backup_endpoint }}
+repo1-s3-bucket={{ rag_backup_bucket }}
+repo1-s3-region={{ rag_backup_region }}
+repo1-s3-key={{ vault_backup_access_key }}
+repo1-s3-key-secret={{ vault_backup_secret_key }}
+repo1-cipher-type=aes-256-cbc
+repo1-cipher-pass={{ vault_backup_cipher_pass }}
+repo1-retention-full=4
+repo1-retention-diff=14
+start-fast=y
+process-max=4
+archive-async=y
+spool-path=/var/spool/pgbackrest
+log-level-console=info
+[enterprise]
+pg1-path=/var/lib/postgresql/18/patroni
+pg1-port=5432

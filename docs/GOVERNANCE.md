@@ -1,0 +1,19 @@
+# Governance, privacy, and support
+
+The default source retention is 365 days from upload, configurable with `DEFAULT_RETENTION_DAYS`. An admin sets the retention that matches the document class. This default is a technical example. Legal and the data owner must set it before go-live. When retention expires, access closes immediately for reads and queries, and the worker schedules a purge. A legal hold stops expiry and purge. Only tenant_admin may change it. Delete closes access immediately, then the worker cleans every workspace and build, plus the files and versions. An attempt that may still be running is waited out until the hard timeout before purge, so it cannot write data back after deletion. The audit tombstone is kept under the separate audit policy.
+
+File checksums and immutable versions support integrity. Replacing a file creates a new version, keeps the current ACL, and schedules a new index. A document is not served for queries while its active version is still being built. That choice avoids a silent stale answer. A source citation names the document UUID and the version. An old version stays reachable only through the document’s current permissions until retention or delete applies.
+
+LightRAG and Ollama run locally. There is no cloud-provider fallback. Production pins the model digest and rejects a model name that contains a cloud provider, but **an egress firewall and allowlist are still required**: a model name alone is not proof of supply-chain or model-provider privacy. Verify model artifacts, licenses, download origin, the Ollama server, and outbound traffic. The runtime image already bundles the tokenizer. The runtime does not need to download a tokenizer or a dependency. API containers are not given admin credentials. Private model and gateway ports are limited by the network and by loopback. The scanner must fail closed and must have signature updates. OCR, data connectors, automatic DLP classification, and enterprise IAM sync are not implemented as extra services in this version.
+
+The application does not store raw questions or answers. A query record stores an HMAC question hash, source IDs, latency, revisions, and feedback. Audit events are append-only and include an HMAC. That is tamper evidence with a shared secret, not an independent signature, non-repudiation, or a WORM database. Export to an archive whose storage policy is immutable, and to a separate SIEM, so responsibility is split. Audit key rotation must keep the old key so the archive can still be verified. Set retention separately for SQL metadata, expired sessions, the audit archive, telemetry, backups, and datasets. Automatic archive rotation and erasure follow platform policy.
+
+| Owner | Responsibility |
+|---|---|
+| Product / knowledge owner | Scope of use, corpus, reference answers, acceptable error rate, and the procedure when the system abstains |
+| IAM / Security | OIDC and MFA, joiner/mover/leaver, role approval, threat review, DLP and egress, access incidents |
+| Platform / SRE | Hosts, network, CA, NAS, GPU, release, alert delivery, capacity, backups, restore and failover drills, on-call |
+| Data / Legal | Classification, retention, legal hold, deletion and backup expiry, privacy and licensing |
+| RAG engineering | Adapter, prompt, chunking, retrieval, evaluation, dependencies, model rollout, quality incidents |
+
+Membership is provisioned by an offline admin CLI, not from a JWT role claim. There is no automatic HR or SCIM sync. Operate a joiner/mover/leaver process, or implement an authorized connector, before serving the full employee population. Disabling a membership applies on the next request and on query revalidation. An IdP logout alone does not automatically remove every application session that is still valid. Set session limits and a local revocation procedure with IAM.

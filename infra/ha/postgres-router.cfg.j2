@@ -1,0 +1,17 @@
+global
+  maxconn 2048
+defaults
+  mode tcp
+  timeout connect 5s
+  timeout client 1h
+  timeout server 1h
+frontend postgres_primary
+  bind {{ rag_pg_router_address }}:5432
+  default_backend patroni_primary
+backend patroni_primary
+  option httpchk GET /primary
+  http-check expect status 200
+  default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+{% for host in groups['postgres_nodes'] %}
+  server {{ host }} {{ hostvars[host].ansible_host }}:5432 check port 8008 check-ssl verify required ca-file /etc/haproxy/tls/ca.crt crt /etc/haproxy/tls/patroni-client.pem
+{% endfor %}

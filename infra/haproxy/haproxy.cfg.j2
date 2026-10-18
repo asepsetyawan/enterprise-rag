@@ -1,0 +1,39 @@
+global
+  log stdout format raw local0
+  maxconn 4096
+  ssl-default-bind-options ssl-min-ver TLSv1.2
+defaults
+  mode http
+  log global
+  timeout connect 5s
+  timeout client 650s
+  timeout server 650s
+  option dontlog-normal
+frontend plain
+  bind :80
+  http-request redirect scheme https code 301
+frontend portal
+  bind :443 ssl crt /etc/haproxy/tls/portal.pem
+  http-response set-header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  acl private_endpoint path_beg /metrics /health /internal /api/docs /openapi.json /auth/dev-login
+  http-request deny if private_endpoint
+  acl valid_host hdr(host) -i {{ rag_hostname }}
+  http-request deny unless valid_host
+  stick-table type ip size 100k expire 10m store http_req_rate(10s)
+  http-request track-sc0 src
+  acl abusive sc_http_req_rate(0) gt 100
+  http-request deny deny_status 429 if abusive
+  acl oversized req.hdr_val(content-length) gt 27262976
+  http-request deny deny_status 413 if oversized
+  http-request del-header X-Forwarded-For
+  http-request del-header X-Forwarded-Proto
+  http-request set-header X-Forwarded-For %[src]
+  http-request set-header X-Forwarded-Proto https
+  default_backend rag_api
+backend rag_api
+  balance leastconn
+  option httpchk GET /health/ready
+  http-check expect status 200
+{% for host in groups['rag_apps'] %}
+  server {{ host }} {{ hostvars[host].ansible_host }}:8088 check inter 10s fall 3 rise 2
+{% endfor %}

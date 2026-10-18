@@ -1,0 +1,98 @@
+name: cnf-enterprise-rag
+x-common: &common
+  image: ${APP_IMAGE:-cnf-enterprise-rag:dev}
+  build: .
+  user: "${RAG_UID:-10001}:${RAG_GID:-10001}"
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: ["/tmp:size=256m,mode=1777"]
+  pids_limit: 256
+  mem_limit: 4g
+  cpus: 2
+  extra_hosts: ["host.docker.internal:host-gateway"]
+  environment: &environment
+    APP_ENV: development
+    PUBLIC_ORIGIN: http://localhost:8088
+    DATABASE_URL_FILE: /run/secrets/app_dsn
+    SESSION_SECRET_FILE: /run/secrets/session_secret
+    INTERNAL_TOKEN_FILE: /run/secrets/internal_token
+    AUDIT_HMAC_KEY_FILE: /run/secrets/audit_hmac_key
+    METRICS_TOKEN_FILE: /run/secrets/metrics_token
+    OIDC_ISSUER: http://localhost:8089/realms/enterprise-rag
+    OIDC_INTERNAL_BASE: http://keycloak:8080
+    OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+    DEV_AUTH_ENABLED: "true"
+    DEV_PASSWORD_FILE: /run/secrets/dev_password
+    STORAGE_ROOT: /data/files
+    RUNTIME_ROOT: /data/runtime
+    TENANT_STORES_FILE: /run/secrets/tenant_stores
+    TENANT_DB_HOST: postgres
+    TENANT_DB_PORT: "5432"
+    GATEWAY_URL: http://gateway:8091
+    RUNTIME_URL: http://runtime:8092
+    OLLAMA_HOSTS: http://host.docker.internal:11434
+    AUDIT_EXPORT_DIR: /data/audit-export
+    OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  secrets: &common-secrets [app_dsn, session_secret, internal_token, audit_hmac_key, metrics_token, oidc_client_secret, dev_password]
+  healthcheck:
+    test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8088/health/ready', timeout=5)"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+services:
+  api:
+    <<: *common
+    ports: ["127.0.0.1:8088:8088"]
+    volumes: ["./data/files:/data/files"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      runtime: {condition: service_healthy}
+      gateway: {condition: service_healthy}
+  worker:
+    <<: *common
+    command: [rag-worker]
+    environment:
+      <<: *environment
+      WORKER_DATABASE_URL_FILE: /run/secrets/worker_dsn
+    secrets: [app_dsn, worker_dsn, session_secret, internal_token, audit_hmac_key, metrics_token, oidc_client_secret, dev_password, tenant_stores]
+    volumes: ["./data/files:/data/files", "./data/audit-export:/data/audit-export"]
+    healthcheck:
+      test: [CMD, python, -m, rag_platform.worker_health]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    stop_grace_period: 35m
+    depends_on:
+      postgres: {condition: service_healthy}
+      runtime: {condition: service_healthy}
+  runtime:
+    <<: *common
+    command: [uvicorn, rag_platform.runtime:app, --host, 0.0.0.0, --port, "8092", --no-access-log, --no-proxy-headers]
+    secrets: [app_dsn, session_secret, internal_token, audit_hmac_key, metrics_token, oidc_client_secret, dev_password, tenant_stores]
+    volumes: ["./data/runtime:/data/runtime"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8092/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  gateway:
+    <<: *common
+    command: [uvicorn, rag_platform.gateway:app, --host, 0.0.0.0, --port, "8091", --no-access-log, --no-proxy-headers]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8091/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+secrets:
+  app_dsn: {file: ./.secrets/app_dsn}
+  worker_dsn: {file: ./.secrets/worker_dsn}
+  session_secret: {file: ./.secrets/session_secret}
+  internal_token: {file: ./.secrets/internal_token}
+  audit_hmac_key: {file: ./.secrets/audit_hmac_key}
+  metrics_token: {file: ./.secrets/metrics_token}
+  oidc_client_secret: {file: ./.secrets/oidc_client_secret}
+  dev_password: {file: ./.secrets/dev_password}
+  tenant_stores: {file: ./.secrets/tenant-stores.json}

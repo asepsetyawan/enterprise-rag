@@ -1,0 +1,93 @@
+name: cnf-rag
+x-common: &common
+  image: {{ rag_image }}
+  user: '10001:10001'
+  init: true
+  restart: always
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: ["/tmp:size=256m,mode=1777"]
+  pids_limit: 256
+  mem_limit: 8g
+  cpus: 4
+  network_mode: host
+  environment: &env
+    APP_ENV: production
+    PUBLIC_ORIGIN: {{ rag_public_origin }}
+    DATABASE_URL_FILE: /run/secrets/app_dsn
+    SESSION_SECRET_FILE: /run/secrets/session_secret
+    INTERNAL_TOKEN_FILE: /run/secrets/internal_token
+    AUDIT_HMAC_KEY_FILE: /run/secrets/audit_hmac_key
+    METRICS_TOKEN_FILE: /run/secrets/metrics_token
+    OIDC_ISSUER: {{ rag_oidc_issuer }}
+    OIDC_INTERNAL_BASE: {{ rag_oidc_issuer | regex_replace('/realms/.*$', '') }}
+    OIDC_CLIENT_ID: {{ rag_oidc_client_id }}
+    OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+    OIDC_REQUIRED_ACR: '{{ rag_oidc_required_acr }}'
+    DEV_AUTH_ENABLED: 'false'
+    STORAGE_ROOT: /data/files
+    RUNTIME_ROOT: /data/runtime
+    TENANT_STORES_FILE: /run/secrets/tenant_stores
+    GATEWAY_URL: http://127.0.0.1:8091
+    RUNTIME_URL: http://127.0.0.1:8092
+    OLLAMA_HOSTS: {{ rag_ollama_hosts }}
+    LLM_DIGEST: {{ rag_llm_digest }}
+    EMBEDDING_DIGEST: {{ rag_embedding_digest }}
+    AUDIT_EXPORT_DIR: /data/audit-export
+    OTEL_EXPORTER_OTLP_ENDPOINT: {{ rag_otlp_endpoint }}
+    ANTIVIRUS_HOST: {{ rag_antivirus_host }}
+    SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+  secrets: [app_dsn, session_secret, internal_token, audit_hmac_key, metrics_token, oidc_client_secret]
+services:
+  api:
+    <<: *common
+    command: [uvicorn, rag_platform.api:app, --host, '0.0.0.0', --port, '8088', --no-access-log, --no-proxy-headers]
+    volumes: ['/srv/rag/files:/data/files', '/etc/ssl/certs:/etc/ssl/certs:ro']
+  worker:
+    <<: *common
+    command: [rag-worker]
+    environment:
+      <<: *env
+      SESSION_SECRET_FILE: ""
+      OIDC_CLIENT_SECRET_FILE: ""
+      DATABASE_URL_FILE: /run/secrets/worker_dsn
+      SERVICE_ROLE: worker
+      WORKER_DATABASE_URL_FILE: /run/secrets/worker_dsn
+    secrets: [worker_dsn, internal_token, audit_hmac_key, metrics_token, tenant_stores]
+    volumes: ['/srv/rag/files:/data/files', '/srv/rag/audit-export:/data/audit-export', '/etc/ssl/certs:/etc/ssl/certs:ro']
+    stop_grace_period: 35m
+    healthcheck:
+      test: [CMD, python, -m, rag_platform.worker_health]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  runtime:
+    <<: *common
+    environment:
+      <<: *env
+      SESSION_SECRET_FILE: ""
+      OIDC_CLIENT_SECRET_FILE: ""
+      DATABASE_URL_FILE: ""
+      AUDIT_HMAC_KEY_FILE: ""
+      SERVICE_ROLE: runtime
+    command: [uvicorn, rag_platform.runtime:app, --host, '127.0.0.1', --port, '8092', --no-access-log, --no-proxy-headers]
+    secrets: [internal_token, metrics_token, tenant_stores]
+    volumes: ['/srv/rag/runtime:/data/runtime', '/etc/ssl/certs:/etc/ssl/certs:ro']
+  gateway:
+    <<: *common
+    environment:
+      <<: *env
+      SESSION_SECRET_FILE: ""
+      OIDC_CLIENT_SECRET_FILE: ""
+      DATABASE_URL_FILE: ""
+      AUDIT_HMAC_KEY_FILE: ""
+      SERVICE_ROLE: gateway
+    secrets: [internal_token, metrics_token]
+    volumes: ['/etc/ssl/certs:/etc/ssl/certs:ro']
+    command: [uvicorn, rag_platform.gateway:app, --host, '127.0.0.1', --port, '8091', --no-access-log, --no-proxy-headers]
+secrets:
+{% for name in ['app_dsn','worker_dsn','session_secret','internal_token','audit_hmac_key','metrics_token','oidc_client_secret'] %}
+  {{ name }}: {file: ./secrets/{{ name }}}
+{% endfor %}
+  tenant_stores: {file: ./secrets/tenant-stores.json}

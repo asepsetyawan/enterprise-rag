@@ -1,0 +1,67 @@
+stages: [verify, package, evaluate, release]
+variables:
+  COMPOSE_PROJECT_NAME: 'rag-${CI_PROJECT_ID}-${CI_PIPELINE_ID}'
+python:
+  stage: verify
+  image: ghcr.io/astral-sh/uv:0.9.5-python3.12-bookworm-slim
+  script:
+    - python scripts/configure.py
+    - cd backend
+    - uv sync --frozen
+    - uv run ruff check rag_platform migrations tests
+    - uv run pytest -m 'not integration and not live' --junitxml=../reports/unit.xml
+  artifacts: {when: always, reports: {junit: reports/unit.xml}}
+web:
+  stage: verify
+  image: node:22-bookworm-slim
+  script: [cd frontend, 'npm ci --no-audit --no-fund', npm run build]
+integration:
+  stage: verify
+  resource_group: rag-integration
+  tags: [docker-integration]
+  script:
+    - python3 scripts/configure.py
+    - docker compose up -d --wait postgres
+    - cd backend
+    - uv sync --frozen
+    - uv run alembic upgrade head
+    - uv run rag-admin bootstrap
+    - uv run pytest -m integration --junitxml=../reports/integration.xml
+  after_script: [docker compose down -v]
+  artifacts: {when: always, reports: {junit: reports/integration.xml}}
+package:
+  stage: package
+  tags: [docker-build]
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+    - docker inspect --format='{{index .RepoDigests 0}}' "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" > image-digest.txt
+    - trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+    - trivy image --format cyclonedx --output sbom.json "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+  artifacts: {paths: [image-digest.txt, sbom.json]}
+staging-evaluation:
+  stage: evaluate
+  tags: [rag-gpu-staging]
+  resource_group: rag-staging
+  script:
+    - test -n "$STAGING_DEPLOY_COMMAND"
+    - $STAGING_DEPLOY_COMMAND
+    - cd backend
+    - uv sync --frozen
+    - uv run rag-evaluate "$GOLDEN_DATASET_FILE" --base-url "$STAGING_URL" --tenant "$EVAL_TENANT_ID" --release "$CI_COMMIT_SHA" --record --output ../reports/release-evaluation.json
+  artifacts: {when: always, paths: [reports/release-evaluation.json]}
+  rules: [{if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'}]
+production:
+  stage: release
+  tags: [production-release]
+  resource_group: rag-production
+  environment: production
+  when: manual
+  allow_failure: false
+  needs: [package, staging-evaluation]
+  script:
+    - test -f "$PRODUCTION_INVENTORY"
+    - python3 -c 'import json,pathlib; pathlib.Path("release-vars.json").write_text(json.dumps({"rag_image":pathlib.Path("image-digest.txt").read_text().strip()}))'
+    - ansible-playbook -i "$PRODUCTION_INVENTORY" infra/ansible/release.yml -e '@release-vars.json'
+  rules: [{if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'}]

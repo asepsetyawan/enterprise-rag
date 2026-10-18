@@ -1,0 +1,9 @@
+route:
+  receiver: operations
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+# Configure the company's approved receiver before production. No messages are sent by this sample.
+receivers:
+  - name: operations
