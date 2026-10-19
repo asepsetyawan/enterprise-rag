@@ -4,6 +4,19 @@ A new project, separate from `../lightrag-ollama`. An internal knowledge portal 
 
 The implementation covers OIDC login with PKCE, a BFF session, CSRF, roles, document ACL, tenant isolation, upload and versioning, an ingestion queue, retries, cited answers, audit, retention and deletion, an evaluation runner, and deployment and operations. **A working local configuration is not evidence that the system has passed company production acceptance.**
 
+## Enterprise readiness
+
+Production acceptance must cover the following areas. The included controls, tools, and deployment templates support these requirements; validate them with the company's infrastructure, documents, and operational owners before go-live.
+
+| Area | Requirements | Project guidance and acceptance |
+|---|---|---|
+| Security | SSO, roles, document-level permissions, tenant isolation | OIDC/PKCE, application roles, document ACL, PostgreSQL RLS, and separate tenant RAG stores. Validate corporate SSO, permission revocation, and cross-tenant access denial. See [Architecture](docs/ARCHITECTURE.md). |
+| Reliability | Backups, tested recovery, failover, ingestion retries | Backup and restore-drill scripts, HA templates, and durable ingestion jobs with leases, backoff, and dead-letter handling. Test recovery and failover on the actual deployment against agreed RPO/RTO targets. See [Operations](docs/OPERATIONS.md). |
+| Operations | Monitoring, audit logs, alerts, upgrade procedures | Metrics, tracing, signed audit exports, and alert rules are included. Configure notification receivers and log retention; rehearse upgrades, migrations, and rollback. See [Operations](docs/OPERATIONS.md) and [Deployment](docs/DEPLOYMENT.md). |
+| Performance | Load tests with your document volume and concurrent users | Run representative ingestion and query workloads, including the target document formats, sizes, and concurrent users. Measure throughput, p95/p99 latency, errors, and resource use. Capacity for 10,000 documents has not been validated. See [Quality and capacity](docs/QUALITY.md). |
+| Answer quality | Evaluation using real questions, citation checks, acceptable error rates | Use reviewed company questions and a separate holdout set. Combine automated citation/security checks with human review of correctness, faithfulness, and completeness; agree acceptable error and abstention rates. See [Quality](docs/QUALITY.md). |
+| Governance | Data retention, deletion, model-provider privacy, support ownership | Define retention and legal-hold policies, verify deletion and recovery reconciliation, and review local-model privacy and network egress. Assign knowledge, IAM, infrastructure, and on-call support owners. See [Governance](docs/GOVERNANCE.md). |
+
 ## Architecture
 
 ![CNF Enterprise RAG architecture: React portal, FastAPI and ingestion worker, OIDC identity, application storage, LightRAG tenant stores, inference gateway, and local Ollama](docs/assets/architecture.svg)
