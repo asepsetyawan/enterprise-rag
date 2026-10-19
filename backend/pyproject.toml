@@ -19,6 +19,8 @@ dependencies = [
   "opentelemetry-api>=1.35,<2",
   "opentelemetry-sdk>=1.35,<2",
   "opentelemetry-exporter-otlp-proto-http>=1.35,<2",
+  "docling==2.140.0",
+  "docling-core[chunking-openai]==2.102.0",
 ]
 
 [dependency-groups]
@@ -28,6 +30,7 @@ dev = ["pytest>=8.4,<10", "pytest-asyncio>=1.2,<2", "ruff>=0.12,<1"]
 rag-admin = "rag_platform.cli:main"
 rag-worker = "rag_platform.worker:main"
 rag-evaluate = "rag_platform.evaluate:main"
+rag-prepare-parser = "rag_platform.parsing:main"
 
 [build-system]
 requires = ["hatchling"]

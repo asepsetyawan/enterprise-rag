@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import signal
+import time
 import uuid
 from datetime import timedelta
 
@@ -16,6 +17,7 @@ from .db import engine, transaction, verify_runtime_role
 from .metrics import worker_metrics
 from .models import Audit, AuditDelivery, Document, DocumentVersion, IndexBuild, Job, now
 from .observability import AUDIT_PENDING, BACKLOG, JOBS, WORKER_HEARTBEAT, configure_logging
+from .parsing import delete_parse_cache
 from .runtime import run_process
 from .security import Access, audit
 from .service import RagService
@@ -89,7 +91,7 @@ async def process(tenant, job_id, token):
             builds = session.scalars(select(IndexBuild).where(IndexBuild.version_id.in_([v.id for v in versions]))).all()
             # A crashed attempt may still be running in the isolated runtime. Wait for its hard timeout.
             active_ingestion = session.scalar(select(Job).where(Job.document_id == doc.id, Job.kind == "ingest", Job.status == "processing", Job.lease_until > now()).limit(1))
-            if active_ingestion or any(b.status == "building" and b.created_at > now() - timedelta(seconds=settings().runtime_timeout + 600) for b in builds):
+            if active_ingestion or any(b.status == "building" and b.created_at > now() - timedelta(seconds=settings().parser_timeout + settings().runtime_timeout + 600) for b in builds):
                 raise RuntimeError("WaitingForBuildTimeout")
             payloads = [{"operation": "purge", "tenant_id": str(tenant), "document_id": str(doc.id), "workspace": b.workspace} for b in builds if b.status != "purged"]
             paths = {v.relative_path for v in versions}
@@ -118,11 +120,13 @@ async def process(tenant, job_id, token):
             if not job or doc.legal_hold:
                 raise RuntimeError("Purge state changed")
             for relative in paths:
+                delete_parse_cache(relative)
                 file_path(relative).unlink(missing_ok=True)
             for build in session.scalars(select(IndexBuild).where(IndexBuild.workspace.in_([p["workspace"] for p in payloads]))):
                 build.status = "purged"
             for version in session.scalars(select(DocumentVersion).where(DocumentVersion.document_id == doc.id)):
                 version.status, version.workspace = "purged", None
+                version.catalog_title, version.catalog_text, version.chunk_metadata = "", "", {}
             doc.status, job.status = "deleted", "done"
             job.lease_token, job.lease_until = None, None
             audit(session, Access(tenant, "worker", "system", (), 0), "document.purged", str(doc.id))
@@ -134,8 +138,24 @@ async def process(tenant, job_id, token):
                 expected = session.get(DocumentVersion, uuid.UUID(payload["version_id"])).checksum
             if hashlib.sha256(file_path(relative).read_bytes()).hexdigest() != expected:
                 raise ValueError("Source checksum mismatch")
-            parsed = await run_process({"operation": "parse", "relative_path": relative}, timeout=60)
+            parse_started = time.monotonic()
+            parsed = await run_process({"operation": "parse", "relative_path": relative,
+                                        "configuration": payload["configuration"]}, timeout=settings().parser_timeout)
             payload["text"] = parsed["text"]
+            payload["chunks"] = parsed.get("chunks", [])
+            with transaction(tenant, worker=True) as session:
+                job = owned(session, job_id, token)
+                if not job:
+                    raise RuntimeError("Job lease lost before index creation")
+                version = session.get(DocumentVersion, job.version_id)
+                doc = session.get(Document, job.document_id)
+                if doc.deleted_at or doc.active_version_id != version.id:
+                    raise RuntimeError("Document version changed before indexing")
+                version.catalog_title = doc.title
+                version.catalog_text = parsed.get("catalog_text", parsed["text"][:180000])
+                version.chunk_metadata = parsed.get("chunk_metadata", {})
+            log.info("document_parsed id=%s parse_ms=%s cache_hit=%s chunks=%s", document_id,
+                     int((time.monotonic() - parse_started) * 1000), parsed.get("cache_hit", False), len(payload["chunks"]))
             await service.operate(payload)
         except (ValueError, RuntimeError, TimeoutError, httpx.HTTPStatusError):
             # A completed runtime response or killed parser proves this attempt cannot write again.
@@ -223,7 +243,7 @@ async def maintenance():
                 delivery.delivered_at = now()
         # Old unpublished workspaces can contain late writes from a crashed attempt.
         with transaction(tenant, worker=True) as session:
-            cutoff = now() - timedelta(seconds=cfg.runtime_timeout + 600)
+            cutoff = now() - timedelta(seconds=cfg.parser_timeout + cfg.runtime_timeout + 600)
             orphans = session.execute(select(IndexBuild, DocumentVersion).join(DocumentVersion, IndexBuild.version_id == DocumentVersion.id).where(
                 IndexBuild.status.in_(["building", "abandoned"]), IndexBuild.created_at < cutoff).limit(10)).all()
             snapshots = []
@@ -274,7 +294,6 @@ async def loop():
                 await maintenance()
                 last_maintenance = asyncio.get_running_loop().time()
             claimed = claim()
-            import time
             WORKER_HEARTBEAT.set(time.time())
             if claimed:
                 await execute_job(claimed)

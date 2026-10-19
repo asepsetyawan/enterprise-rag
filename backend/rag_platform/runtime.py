@@ -38,6 +38,7 @@ class Operation(BaseModel):
     version_id: uuid.UUID | None = None
     workspace: str = Field(max_length=160)
     text: str = Field(default="", max_length=2_000_000)
+    chunks: list[str] = Field(default_factory=list, max_length=10000)
     question: str = Field(default="", max_length=8000)
     track_id: str = ""
     configuration: dict = Field(default_factory=dict)

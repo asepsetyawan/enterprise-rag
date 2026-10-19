@@ -27,13 +27,14 @@ This is a logical service overview. See [Architecture and security boundaries](d
 
 ## Run locally
 
-Prerequisites: Python 3.12, `uv`, Node.js 22+, Docker Compose, and Ollama. Run these commands from this project folder.
+Prerequisites: Python 3.12, `uv`, Node.js 22+, Docker Compose, Ollama, and Tesseract OCR (`brew install tesseract` on macOS; `tesseract-ocr tesseract-ocr-eng` on Debian). Run these commands from this project folder.
 
 ```sh
 python3 scripts/configure.py
 docker compose up -d --wait postgres
 cd backend
 uv sync --frozen
+uv run rag-prepare-parser
 uv run alembic upgrade head
 uv run rag-admin bootstrap
 cd ../frontend
@@ -56,7 +57,11 @@ backend/.venv/bin/python scripts/sso_smoke.py
 
 Then use **Sign in with SSO**. Development Keycloak is at http://localhost:8089. The imported realm is for the demo only, not for production.
 
-Upload `examples/kebijakan-perjalanan.md`, wait until the status is **Ready**, then ask “What is the domestic travel hotel allowance?”. The expected result is Rp750,000 per night, with a citation. The sample source is written in Indonesian; the portal itself is in English. The document list, queue, permissions, audit trail, and evaluation results are available in the portal. PDFs must contain text. OCR for scans is not part of this pipeline.
+Upload `examples/kebijakan-perjalanan.md`, wait until the status is **Ready**, then ask “Berapa plafon hotel perjalanan dinas domestik?”. The expected result is Rp750,000 per night, with a citation. The sample source is written in Indonesian; the portal itself is in English. The document list, queue, permissions, audit trail, and evaluation results are available in the portal. Automatic routing currently uses lexical matching, so cross-language queries may require manual document selection.
+
+Docling parses PDF and DOCX structure; `HybridChunker` keeps heading context and table headers within the token budget. PDF scans use local Tesseract on regions requiring OCR. The default OCR language is `eng`; install the Indonesian Tesseract language data and set `PARSER_OCR_LANGUAGES=eng,ind` for bilingual OCR. The Docker image includes both language packs. `rag-prepare-parser` downloads layout/table artifacts once (about 670 MB with the pinned versions). Parsing runs on CPU with two threads, outside query handling. The image bundles these artifacts and disables Hugging Face network downloads at runtime.
+
+If no documents are selected, an indexed PostgreSQL catalog chooses up to `ROUTING_TOP_K=5` relevant documents after SQL tenant/ACL/retention/version filters. Manual selection supports up to 20 documents. No catalog match produces an abstention. See [Structured ingestion and routing](docs/STRUCTURED_RETRIEVAL.md) for migration, cache lifecycle, limitations, and evaluation.
 
 ## Where is data stored?
 
@@ -66,6 +71,7 @@ Upload `examples/kebijakan-perjalanan.md`, wait until the status is **Ready**, t
 | Keycloak | Database `keycloak`, its own role | Company IdP, or Keycloak HA operated by the IAM team |
 | Chunks, vectors, entities, graph, LightRAG status | One logical database `rag_<tenant_uuid>` per tenant, in the same PostgreSQL | The same PostgreSQL HA cluster, with separate credentials |
 | Immutable original files | `data/files/<tenant>/<document>/<version>.<ext>` | Encrypted shared NAS, with snapshots and backup |
+| Derived parse/chunk cache | Beside the original file, keyed by source checksum and parser configuration | Same controlled NAS and backup lifecycle; removed by document purge |
 | Workspace scratch and tokenizer | `data/runtime` | Local runtime disk; not a source of truth |
 | HMAC-signed audit export | `data/audit-export/<tenant>/<event>.json` | A separate archive with an immutable/WORM policy, plus SIEM |
 | Secrets | `.secrets/`, local `.env`, not committed | Company vault or secret manager; a file mount per service |
@@ -100,6 +106,7 @@ cd ../frontend
 npm run build
 cd ..
 backend/.venv/bin/python scripts/smoke.py
+backend/.venv/bin/python scripts/smoke.py --auto-routing --mode mix
 ```
 
 The smoke test uses real LightRAG, PostgreSQL, and Ollama. Integration tests use real PostgreSQL with a model injected for the test. Local reports are in `reports/` (ignored by Git). For evaluation, replace the UUID in `eval/golden.template.jsonl` with your uploaded document ID, save it as `eval/golden.local.jsonl`, then:

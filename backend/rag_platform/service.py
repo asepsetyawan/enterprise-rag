@@ -8,6 +8,7 @@ import tiktoken
 from pydantic import BaseModel, Field
 
 from .config import settings
+from .parsing import content_hash
 
 
 class Citation(BaseModel):
@@ -65,7 +66,8 @@ class RagService:
 
         async def one(snapshot):
             async with slots:
-                result = await self.operate({**snapshot, "operation": "retrieve", "question": question,
+                runtime_snapshot = {k: v for k, v in snapshot.items() if k != "chunk_metadata"}
+                result = await self.operate({**runtime_snapshot, "operation": "retrieve", "question": question,
                                              "parameters": parameters})
                 return snapshot, result
 
@@ -95,7 +97,9 @@ class RagService:
                 used += min(len(encoded), remaining)
                 seen.add(fingerprint)
                 sources.append({"source_id": f"S{len(sources) + 1}", "document_id": snapshot["document_id"],
-                                "version_id": snapshot["version_id"], "title": snapshot["title"], "content": content})
+                                "version_id": snapshot["version_id"], "title": snapshot["title"], "content": content,
+                                "chunk_id": chunk.get("chunk_id"),
+                                **snapshot.get("chunk_metadata", {}).get(content_hash(chunk["content"]), {})})
         return sources
 
     async def generate(self, question, sources):

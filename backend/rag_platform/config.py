@@ -60,7 +60,12 @@ class Settings(BaseSettings):
     top_k: int = 20
     chunk_top_k: int = 8
     context_tokens: int = 8000
-    retrieval_profile: str = "fixed-1000-overlap100-mix-v1"
+    retrieval_profile: str = "docling-structure-catalog-v2"
+    parser_revision: str = "docling-hybrid-v1"
+    parser_timeout: int = 600
+    parser_artifacts_path: Path = Path("../data/parser-models")
+    parser_ocr_languages: str = "eng"
+    routing_top_k: int = 5
     prompt_revision: str = "grounded-json-v1"
     job_lease_seconds: int = 90
     job_max_attempts: int = 5
@@ -85,11 +90,15 @@ class Settings(BaseSettings):
                 raise ValueError(f"{field} must contain at least 32 random characters; run scripts/configure.py")
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError("chunk_overlap must be smaller than chunk_size")
+        if not 64 <= self.chunk_size <= 8000:
+            raise ValueError("Chunk size must be between 64 and 8000 tokens")
         for field in ("chunk_size", "context_tokens", "runtime_concurrency", "generation_concurrency", "embedding_concurrency", "model_timeout", "runtime_timeout", "max_upload_bytes", "job_lease_seconds"):
             if getattr(self, field) <= 0:
                 raise ValueError(f"{field} must be positive")
         if self.chunk_overlap < 0 or not 1 <= self.job_max_attempts <= 20:
             raise ValueError("Invalid chunk overlap or job retry limit")
+        if not 1 <= self.routing_top_k <= self.max_query_documents <= 20 or self.parser_timeout <= 0:
+            raise ValueError("Invalid routing limit or parser timeout")
         if self.context_tokens + self.llm_output_tokens + 2000 > self.llm_context:
             raise ValueError("Context + output + instruction budget exceeds model context")
         if self.app_env == "production":

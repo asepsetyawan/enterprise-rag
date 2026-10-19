@@ -32,6 +32,9 @@ def validate_embedding_configuration(configuration, cfg):
 async def execute(payload):
     cfg = settings()
     if payload["operation"] == "parse":
+        if payload.get("configuration", {}).get("parser"):
+            from .parsing import parse_document
+            return parse_document(payload["relative_path"], payload["configuration"]["parser"])
         return {"text": extract_text(payload["relative_path"])}
     tenant = uuid.UUID(payload["tenant_id"])
     document = uuid.UUID(payload["document_id"])
@@ -97,6 +100,7 @@ async def execute(payload):
                        kv_storage="PGKVStorage", vector_storage="PGVectorStorage",
                        graph_storage="PGTableGraphStorage", doc_status_storage="PGDocStatusStorage",
                        llm_model_func=llm, llm_model_name=cfg.llm_model,
+                       tiktoken_model_name="gpt-4" if configuration.get("parser") else "gpt-4o-mini",
                        llm_model_max_async=1, embedding_func_max_async=1,
                        embedding_batch_num=4, max_parallel_insert=1,
                        chunk_token_size=chunk_size, chunk_overlap_token_size=overlap,
@@ -109,8 +113,12 @@ async def execute(payload):
         try:
             if payload["operation"] == "ingest":
                 source = f"{document}:{payload['version_id']}"
-                await rag.ainsert(payload["text"], ids=str(document), file_paths=source,
-                                  track_id=payload["track_id"])
+                if configuration.get("parser"):
+                    from .structured import ingest_structured
+                    await ingest_structured(rag, payload, str(document), source)
+                else:
+                    await rag.ainsert(payload["text"], ids=str(document), file_paths=source,
+                                      track_id=payload["track_id"])
                 status = await rag.doc_status.get_by_id(str(document))
                 status_value = status.get("status") if isinstance(status, dict) else getattr(status, "status", None)
                 status_value = getattr(status_value, "value", status_value)

@@ -56,7 +56,7 @@ services:
       WORKER_DATABASE_URL_FILE: /run/secrets/worker_dsn
     secrets: [worker_dsn, internal_token, audit_hmac_key, metrics_token, tenant_stores]
     volumes: ['/srv/rag/files:/data/files', '/srv/rag/audit-export:/data/audit-export', '/etc/ssl/certs:/etc/ssl/certs:ro']
-    stop_grace_period: 35m
+    stop_grace_period: 45m
     healthcheck:
       test: [CMD, python, -m, rag_platform.worker_health]
       interval: 30s

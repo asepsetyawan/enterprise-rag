@@ -17,6 +17,8 @@ def evaluate(client, cases):
         response = client.post("/api/chat", json={"question": case["question"], "document_ids": case.get("document_ids", []), "mode": case.get("mode", "mix")})
         expected_status = case.get("expected_status", 200)
         checks = {"status": response.status_code == expected_status}
+        retrieval_metrics = {}
+        timings = {}
         if response.status_code == 200 and expected_status == 200:
             result = response.json()
             expected_abstain = case.get("expected_abstain", False)
@@ -27,12 +29,37 @@ def evaluate(client, cases):
             actual_sources = {s["document_id"] for s in result["sources"]}
             checks["source_allowlist"] = actual_sources <= set(case.get("allowed_source_ids", case.get("document_ids", [])))
             checks["required_sources"] = set(case.get("required_source_ids", [])) <= actual_sources
+            selected = result.get("routing", {}).get("document_ids", [])
+            timings = result.get("timings", {})
+            if "expected_document_ids" in case:
+                expected = set(case["expected_document_ids"])
+                found = set(selected) & expected
+                checks["routing_recall"] = (len(found) / len(expected) if expected else float(not selected)) >= case.get("min_routing_recall", 1.0)
+                retrieval_metrics = {"recall": len(found) / len(expected) if expected else float(not selected),
+                                     "precision": len(found) / len(selected) if selected else float(not expected),
+                                     "mrr": next((1 / rank for rank, item in enumerate(selected, 1) if item in expected), 0.0)}
+            checks["routing_excludes_forbidden"] = not set(selected) & set(case.get("forbidden_document_ids", []))
+            if "allowed_document_ids" in case:
+                checks["routing_allowlist"] = set(selected) <= set(case["allowed_document_ids"])
+            if case.get("require_provenance"):
+                checks["source_provenance"] = bool(result["sources"]) and all(s.get("headings") or s.get("pages") for s in result["sources"])
         results.append({"id": case["id"], "passed": all(checks.values()), "checks": checks,
+                        "retrieval": retrieval_metrics, "timings": timings,
                         "latency_ms": int((time.monotonic() - start) * 1000)})
     passed = sum(case["passed"] for case in results)
-    return results, {"cases": len(results), "pass_rate": passed / len(results) if results else 0,
-                     "failed": len(results) - passed,
-                     "p95_latency_ms": sorted(r["latency_ms"] for r in results)[max(0, math.ceil(len(results) * .95) - 1)] if results else 0}
+    metrics = {"cases": len(results), "pass_rate": passed / len(results) if results else 0, "failed": len(results) - passed}
+    for percentile in (50, 95):
+        metrics[f"p{percentile}_latency_ms"] = quantile([r["latency_ms"] for r in results], percentile)
+        for stage in ("routing_ms", "retrieval_ms", "generation_ms"):
+            metrics[f"p{percentile}_{stage}"] = quantile([r["timings"][stage] for r in results if stage in r["timings"]], percentile)
+    scored = [r["retrieval"] for r in results if r["retrieval"]]
+    for name in ("recall", "precision", "mrr"):
+        metrics[f"routing_{name}"] = sum(r[name] for r in scored) / len(scored) if scored else None
+    return results, metrics
+
+
+def quantile(values, percentile):
+    return sorted(values)[max(0, math.ceil(len(values) * percentile / 100) - 1)] if values else None
 
 
 def main():

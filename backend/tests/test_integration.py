@@ -12,7 +12,7 @@ from rag_platform.api import app
 from rag_platform.cli import DEMO_TENANTS, admin_dsn
 from rag_platform.config import settings
 from rag_platform.db import transaction, verify_runtime_role
-from rag_platform.models import Document, IndexBuild, Job, now
+from rag_platform.models import Document, DocumentVersion, IndexBuild, Job, now
 from rag_platform.service import GroundedAnswer
 from rag_platform.storage import workspace_for
 from rag_platform.worker import publish
@@ -250,3 +250,124 @@ async def test_completed_parser_failure_marks_attempt_abandoned(document, monkey
     with transaction(tenant) as session:
         build = session.scalar(select(IndexBuild).where(IndexBuild.version_id == version_id))
         assert build.status == "abandoned"
+
+
+@pytest.fixture
+def catalog_documents(document):
+    """More private hits than the candidate limit, plus stale/expired/foreign hits."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    cfg = settings()
+    identifiers = []
+    target = None
+    with Session(create_engine(cfg.migration_database_url.get_secret_value())) as session, session.begin():
+        for index in range(34):
+            tenant = uuid.UUID(DEMO_TENANTS[1] if index == 33 else TENANT)
+            identifier, version_id = uuid.uuid4(), uuid.uuid4()
+            identifiers.append(identifier)
+            owner = "33333333-3333-4333-8333-333333333333" if index == 33 else "22222222-2222-4222-8222-222222222222"
+            doc = Document(id=identifier, tenant_id=tenant, owner_id=owner, title="Accommodation policy",
+                           filename="policy.md", status="ready", active_version_id=version_id, acl_users=[], acl_groups=[])
+            if index in (30, 31, 32):
+                doc.acl_groups = ["hr"]
+            if index == 30:
+                target = str(identifier)
+            if index == 31:
+                doc.retention_until = now() - timedelta(days=1)
+            if index == 32:
+                doc.deleted_at = now()
+            session.add(doc)
+            session.flush()
+            session.add(DocumentVersion(id=version_id, tenant_id=tenant, document_id=identifier,
+                                        checksum="a" * 64, relative_path="unused.md", filename="policy.md", bytes=20,
+                                        workspace=workspace_for(tenant, identifier, uuid.uuid4()), status="ready",
+                                        profile="test", configuration={}, catalog_title="Accommodation insurance",
+                                        catalog_text="Uniquehotelterm policy. " * (20 if index < 30 else 1)))
+        session.flush()
+        # An inactive version must never route the active document for old-only terms.
+        session.add(DocumentVersion(tenant_id=uuid.UUID(TENANT), document_id=uuid.UUID(target),
+                                    checksum="b" * 64, relative_path="unused.md", filename="old.md", bytes=20,
+                                    workspace="unused-old", status="ready", profile="test", configuration={},
+                                    catalog_text="Supersededonlyterm"))
+    yield target, [str(v) for v in identifiers if str(v) != target]
+    with psycopg.connect(admin_dsn()) as connection:
+        connection.execute("DELETE FROM app.document_versions WHERE document_id=ANY(%s)", [identifiers])
+        connection.execute("DELETE FROM app.documents WHERE id=ANY(%s)", [identifiers])
+
+
+def test_catalog_authorization_before_limit_and_group_access(client, catalog_documents):
+    target, forbidden = catalog_documents
+    login(client)
+    app.state.rag = Model()
+    response = client.post("/api/chat", json={"question": "Uniquehotelterm?"})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["routing"] == {"strategy": "catalog", "document_ids": [target]}
+    assert not set(result["routing"]["document_ids"]) & set(forbidden)
+    assert result["sources"][0]["document_id"] == target
+    assert all(stage in result["timings"] for stage in ("routing_ms", "retrieval_ms", "generation_ms", "total_ms"))
+    login(client, "bob")
+    response = client.post("/api/chat", json={"question": "Uniquehotelterm?"})
+    assert response.status_code == 200 and len(response.json()["routing"]["document_ids"]) == settings().routing_top_k
+
+
+def test_catalog_no_match_and_inactive_version_abstain(client, catalog_documents):
+    login(client)
+    app.state.rag = Model()
+    for question in ("Supersededonlyterm?", "Unknowncatalogterm?", "???"):
+        response = client.post("/api/chat", json={"question": question})
+        assert response.status_code == 200, response.text
+        assert response.json()["abstained"] and response.json()["routing"]["document_ids"] == []
+
+
+def test_catalog_revocation_during_generation(client, catalog_documents):
+    target, _ = catalog_documents
+    login(client)
+
+    def revoke():
+        with psycopg.connect(admin_dsn()) as connection:
+            connection.execute("UPDATE app.documents SET acl_groups='[]',acl_revision=acl_revision+1 WHERE id=%s", [target])
+
+    app.state.rag = Model(revoke)
+    response = client.post("/api/chat", json={"question": "Uniquehotelterm?"})
+    assert response.status_code == 409 and "Rp500.000" not in response.text
+
+
+def test_catalog_rls_forbids_cross_tenant_metadata(catalog_documents):
+    with transaction(DEMO_TENANTS[1]) as session:
+        assert not session.scalars(select(DocumentVersion).where(DocumentVersion.document_id == uuid.UUID(catalog_documents[0]))).all()
+
+
+@pytest.mark.asyncio
+async def test_purge_removes_catalog_provenance_and_parse_cache(document, monkeypatch):
+    from rag_platform.service import RagService
+    from rag_platform.storage import file_path
+    from rag_platform.worker import process
+
+    tenant, token = uuid.UUID(TENANT), uuid.uuid4()
+    with transaction(tenant, worker=True) as session:
+        doc = session.get(Document, uuid.UUID(document))
+        doc.deleted_at, doc.status = now(), "deleting"
+        version_id = doc.active_version_id
+        version = session.get(DocumentVersion, version_id)
+        version.catalog_text, version.chunk_metadata = "Sensitive derived text", {"hash": {"headings": ["Private"]}}
+        source = file_path(version.relative_path)
+        cache = source.with_name(source.name + ".test.parsed.json")
+        cache.write_text('{"text":"Sensitive parsed text"}')
+        job = Job(tenant_id=tenant, document_id=doc.id, kind="purge", status="processing",
+                  lease_token=token, lease_until=now() + timedelta(seconds=90))
+        session.add(job)
+        session.flush()
+        job_id = job.id
+
+    async def operate(self, payload):
+        assert payload["operation"] == "purge"
+        return {"purged": True}
+
+    monkeypatch.setattr(RagService, "operate", operate)
+    await process(tenant, job_id, token)
+    assert not source.exists() and not cache.exists()
+    with transaction(tenant, worker=True) as session:
+        version = session.get(DocumentVersion, version_id)
+        assert version.status == "purged" and version.workspace is None
+        assert not version.catalog_text and not version.catalog_title and not version.chunk_metadata

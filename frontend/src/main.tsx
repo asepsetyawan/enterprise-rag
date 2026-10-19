@@ -60,6 +60,8 @@ type Answer = {
     document_id: string;
     version_id: string;
     title: string;
+    headings?: string[];
+    pages?: number[];
   }[];
 };
 type Row = Record<string, unknown>;
@@ -665,7 +667,7 @@ function Portal() {
                       <Files size={16} />
                       {selected.length
                         ? `${selected.length} documents selected`
-                        : "All accessible sources"}
+                        : "Automatic source selection"}
                     </span>
                     <button
                       className="primary ask-button"
@@ -724,6 +726,9 @@ function Portal() {
                               <span className="citation-number">{i + 1}</span>
                               <div>
                                 <b>{s?.title || c.source_id}</b>
+                                {s && (s.headings?.length || s.pages?.length) ? (
+                                  <p>{[s.headings?.join(" → "), s.pages?.length ? `Page ${s.pages.join(", ")}` : ""].filter(Boolean).join(" · ")}</p>
+                                ) : null}
                                 <blockquote>{c.quote}</blockquote>
                                 {s && (
                                   <a
@@ -832,13 +837,13 @@ function Portal() {
                 <div className="source-content">
                   <p>
                     Select sources to focus the answer, or leave them empty to
-                    search every ready document (max 20).
+                    automatically find relevant documents you can access.
                   </p>
                   <div className="source-toolbar">
                     <span>
                       {selected.length
                         ? `${selected.length} selected`
-                        : "All sources active"}
+                        : "Automatic selection"}
                     </span>
                     {selected.length > 0 && (
                       <button

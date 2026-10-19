@@ -14,18 +14,27 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["naive", "mix", "local", "global", "hybrid"], default="naive")
     parser.add_argument("--name", default="kebijakan-perjalanan.md")
+    parser.add_argument("--base-url", default="http://localhost:8088")
+    parser.add_argument("--auto-routing", action="store_true")
+    parser.add_argument("--reindex-document", help="Reindex an existing travel-policy smoke document instead of uploading another")
     args = parser.parse_args()
     password = (ROOT / ".secrets/dev_password").read_text().strip()
-    with httpx.Client(base_url="http://localhost:8088", timeout=900, trust_env=False) as client:
+    with httpx.Client(base_url=args.base_url, timeout=900, trust_env=False) as client:
         response = client.post("/auth/dev-login", json={"username": "alice", "password": password})
         response.raise_for_status()
         me = client.get("/api/me").json()
         client.headers.update({"X-Tenant-ID": TENANT, "X-CSRF-Token": me["csrf"]})
         source = ROOT / "examples/kebijakan-perjalanan.md"
-        response = client.post("/api/documents", files={"file": (args.name, source.read_bytes(), "text/markdown")})
-        response.raise_for_status()
-        identifier = response.json()["id"]
-        print("Uploaded example:", identifier, flush=True)
+        ingestion_started = time.monotonic()
+        if args.reindex_document:
+            identifier = args.reindex_document
+            client.post(f"/api/documents/{identifier}/reindex").raise_for_status()
+            print("Reindexing example:", identifier, flush=True)
+        else:
+            response = client.post("/api/documents", files={"file": (args.name, source.read_bytes(), "text/markdown")})
+            response.raise_for_status()
+            identifier = response.json()["id"]
+            print("Uploaded example:", identifier, flush=True)
         deadline = time.monotonic() + 1800
         previous = None
         while time.monotonic() < deadline:
@@ -40,20 +49,30 @@ def main():
             time.sleep(3)
         else:
             raise TimeoutError("Ingestion timeout")
-        response = client.post("/api/chat", json={"question": "Berapa plafon hotel untuk perjalanan dinas domestik?", "document_ids": [identifier], "mode": args.mode})
+        ingestion_ms = int((time.monotonic() - ingestion_started) * 1000)
+        response = client.post("/api/chat", json={"question": "Berapa plafon hotel untuk perjalanan dinas domestik?", "document_ids": [] if args.auto_routing else [identifier], "mode": args.mode})
         response.raise_for_status()
         answer = response.json()
         if answer["abstained"] or not answer["citations"] or "750" not in answer["answer"]:
             raise AssertionError("Expected grounded Rp750.000 answer")
         assert all(s["document_id"] == identifier for s in answer["sources"])
+        if args.auto_routing:
+            assert identifier in answer["routing"]["document_ids"]
+            assert any(s.get("headings") for s in answer["sources"])
         print("Grounded answer and citations OK", flush=True)
         client.post("/auth/logout").raise_for_status()
         client.post("/auth/dev-login", json={"username": "bob", "password": password}).raise_for_status()
         me = client.get("/api/me").json()
         client.headers["X-CSRF-Token"] = me["csrf"]
         assert client.post("/api/chat", json={"question": "Berapa plafon hotel?", "document_ids": [identifier]}).status_code == 404
+        if args.auto_routing:
+            response = client.post("/api/chat", json={"question": "Berapa plafon hotel?", "mode": args.mode})
+            response.raise_for_status()
+            assert identifier not in response.json()["routing"]["document_ids"]
+            assert response.json()["abstained"]
         print("Unauthorized user denied OK", flush=True)
-        report = {"document_id": identifier, "mode": args.mode, "ingestion": "passed", "answer": answer, "unauthorized_user": "denied"}
+        report = {"document_id": identifier, "mode": args.mode, "ingestion": "passed", "ingestion_ms": ingestion_ms,
+                  "automatic_routing": args.auto_routing, "answer": answer, "unauthorized_user": "denied"}
         (ROOT / "reports").mkdir(exist_ok=True)
         (ROOT / "reports/live-smoke.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
 

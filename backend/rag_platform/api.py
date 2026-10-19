@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from starlette.staticfiles import StaticFiles
 
+from .catalog import select_documents
 from .cli import DEMO_USERS
 from .config import settings
 from .db import transaction, verify_runtime_role
@@ -87,7 +88,9 @@ def require_role(actor, *roles):
 
 def configuration():
     cfg = settings()
+    from .parsing import parser_configuration
     return {"chunk_size": cfg.chunk_size, "chunk_overlap": cfg.chunk_overlap,
+            "parser": parser_configuration(),
             "embedding_model": cfg.embedding_model, "embedding_dim": cfg.embedding_dim,
             "embedding_digest": cfg.embedding_digest, "extraction_model": cfg.llm_model,
             "extraction_model_digest": cfg.llm_digest}
@@ -413,28 +416,30 @@ async def chat(body: ChatInput, request: Request, actor: Access = Depends(access
         raise HTTPException(422, "Invalid retrieval mode")
     started = time.monotonic()
     with transaction(actor.tenant_id, actor.user_id) as session:
-        query = select(Document).where(Document.status == "ready").order_by(Document.id)
-        if body.document_ids:
-            query = query.where(Document.id.in_(body.document_ids))
-        docs = [doc for doc in session.scalars(query) if can_read(doc, actor)]
-        if body.document_ids and {doc.id for doc in docs} != set(body.document_ids):
+        documents = select_documents(session, body.question, actor, body.document_ids)
+        if body.document_ids and {doc.id for doc, version in documents} != set(body.document_ids):
             raise HTTPException(404, "One or more documents are unavailable")
-        if len(docs) > settings().max_query_documents:
+        if len(documents) > settings().max_query_documents:
             raise HTTPException(422, "Select fewer documents for this query")
         snapshots = []
-        for doc in docs:
-            version = session.get(DocumentVersion, doc.active_version_id)
+        for doc, version in documents:
             if version and version.workspace and version.status == "ready":
                 snapshots.append({"tenant_id": str(actor.tenant_id), "document_id": str(doc.id), "version_id": str(version.id),
                                   "workspace": version.workspace, "configuration": version.configuration,
-                                  "title": doc.title, "acl_revision": doc.acl_revision})
+                                  "title": doc.title, "acl_revision": doc.acl_revision,
+                                  "chunk_metadata": version.chunk_metadata})
+    timings = {"routing_ms": int((time.monotonic() - started) * 1000)}
+    routed_ids = [s["document_id"] for s in snapshots]
     try:
         await asyncio.wait_for(request.app.state.query_slots.acquire(), 1)
     except TimeoutError as exc:
         raise HTTPException(429, "Query capacity reached", headers={"Retry-After": "5"}) from exc
     try:
         async with asyncio.timeout(settings().query_timeout):
+            stage = time.monotonic()
             sources = await request.app.state.rag.retrieve(body.question, snapshots, {"mode": body.mode, "top_k": body.top_k, "chunk_top_k": body.chunk_top_k})
+            timings["retrieval_ms"] = int((time.monotonic() - stage) * 1000)
+            stage = time.monotonic()
             for attempt in range(2):
                 await revalidate(request, actor.tenant_id, snapshots)
                 try:
@@ -445,20 +450,26 @@ async def chat(body: ChatInput, request: Request, actor: Access = Depends(access
                         answer = GroundedAnswer(answer="", abstained=True, citations=[])
             answer = validate_answer(answer, sources)
             actor = await revalidate(request, actor.tenant_id, snapshots)
+            timings["generation_ms"] = int((time.monotonic() - stage) * 1000)
     except (httpx.HTTPError, TimeoutError) as exc:
         raise HTTPException(503, "Retrieval or model service unavailable; try again later") from exc
     finally:
         request.app.state.query_slots.release()
     query_id = uuid.uuid4()
+    timings["total_ms"] = int((time.monotonic() - started) * 1000)
     source_ids = sorted({s["document_id"] for s in sources if s["source_id"] in {c.source_id for c in answer.citations}})
     with transaction(actor.tenant_id, actor.user_id) as session:
         session.add(QueryRecord(id=query_id, tenant_id=actor.tenant_id, user_id=actor.user_id,
                                 question_hash=hmac.new(settings().audit_hmac_key.get_secret_value().encode(), ("question:" + body.question).encode(), hashlib.sha256).hexdigest(), source_ids=source_ids, profile=settings().retrieval_profile,
-                                prompt_revision=settings().prompt_revision, latency_ms=int((time.monotonic() - started) * 1000), abstained=answer.abstained))
+                                selected_source_ids=routed_ids, timings=timings,
+                                prompt_revision=settings().prompt_revision, latency_ms=timings["total_ms"], abstained=answer.abstained))
         audit(session, actor, "query.answer", str(query_id), {"source_ids": source_ids, "abstained": answer.abstained}, request.state.request_id)
     QUERIES.labels("abstained" if answer.abstained else "answered").inc()
     cited = {c.source_id for c in answer.citations}
-    return {"query_id": str(query_id), **answer.model_dump(), "sources": [{k: v for k, v in s.items() if k != "content"} for s in sources if s["source_id"] in cited]}
+    return {"query_id": str(query_id), **answer.model_dump(),
+            "routing": {"strategy": "manual" if body.document_ids else "catalog", "document_ids": routed_ids},
+            "timings": timings,
+            "sources": [{k: v for k, v in s.items() if k != "content"} for s in sources if s["source_id"] in cited]}
 
 
 class Feedback(BaseModel):

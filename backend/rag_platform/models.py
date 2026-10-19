@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     Boolean,
+    Computed,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -12,7 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -85,6 +86,7 @@ class DocumentVersion(Base):
     __tablename__ = "document_versions"
     __table_args__ = (
         ForeignKeyConstraint(["tenant_id", "document_id"], ["app.documents.tenant_id", "app.documents.id"]),
+        Index("document_versions_search_gin", "search_vector", postgresql_using="gin"),
         UniqueConstraint("tenant_id", "id"), {"schema": "app"},
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
@@ -97,6 +99,12 @@ class DocumentVersion(Base):
     workspace: Mapped[str | None] = mapped_column(String(160), nullable=True)
     profile: Mapped[str] = mapped_column(String(160))
     configuration: Mapped[dict] = mapped_column(JSONB, default=dict)
+    catalog_title: Mapped[str] = mapped_column(Text, default="", server_default="")
+    catalog_text: Mapped[str] = mapped_column(Text, default="", server_default="")
+    chunk_metadata: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    search_vector: Mapped[str] = mapped_column(TSVECTOR, Computed(
+        "setweight(to_tsvector('simple'::regconfig, catalog_title), 'A') || "
+        "setweight(to_tsvector('simple'::regconfig, catalog_text), 'B')", persisted=True))
     status: Mapped[str] = mapped_column(String(30), default="queued")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
@@ -166,6 +174,8 @@ class QueryRecord(Base):
     user_id: Mapped[str] = mapped_column(String(200))
     question_hash: Mapped[str] = mapped_column(String(64))
     source_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    selected_source_ids: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    timings: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
     profile: Mapped[str] = mapped_column(String(160))
     prompt_revision: Mapped[str] = mapped_column(String(160))
     latency_ms: Mapped[int] = mapped_column(Integer)

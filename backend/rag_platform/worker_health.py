@@ -13,7 +13,7 @@ def main():
         response.raise_for_status()
         metrics = response.text
     timestamp = next(float(line.split()[1]) for line in metrics.splitlines() if line.startswith("rag_worker_heartbeat_timestamp_seconds "))
-    raise SystemExit(0 if time.time() - timestamp < cfg.runtime_timeout + 600 else 1)
+    raise SystemExit(0 if time.time() - timestamp < cfg.parser_timeout + cfg.runtime_timeout + 600 else 1)
 
 
 if __name__ == "__main__":
