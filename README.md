@@ -19,11 +19,13 @@ Production acceptance must cover the following areas. The included controls, too
 
 ## Architecture
 
-![CNF Enterprise RAG architecture: React portal, FastAPI and ingestion worker, OIDC identity, application storage, LightRAG tenant stores, inference gateway, and local Ollama](docs/assets/architecture.svg)
+![CNF Enterprise RAG architecture: React portal, FastAPI, PostgreSQL document routing, Docling and selective Tesseract OCR, HybridChunker, source parse cache, tenant LightRAG stores, inference gateway, and local Ollama](docs/assets/architecture.svg)
 
-The API checks tenant membership and document permissions before retrieval and validates citations before returning an answer. The ingestion worker processes durable PostgreSQL jobs; LightRAG stores each tenant's graph and vectors in a separate database. Chat and embedding requests run through the private gateway to local Ollama.
+The API checks tenant membership and document permissions before retrieval and validates citations before returning an answer. The ingestion worker processes durable PostgreSQL jobs, uses local Docling with selective Tesseract OCR and HybridChunker, and caches parsed chunks by source checksum and parser profile. It stores heading/page provenance and the searchable catalog on each document version, then sends precomputed chunks to LightRAG's explicit C pipeline. LightRAG stores each tenant's graph and vectors in a separate database. Chat and embedding requests run through the private gateway to local Ollama.
 
-This is a logical service overview. See [Architecture and security boundaries](docs/ARCHITECTURE.md) for the detailed request flows and production topology.
+Queries reuse stored chunks. Automatic PostgreSQL catalog routing applies tenant, ACL, retention, and active-version filters before ranking and candidate limits; manual selection uses the same access checks. No catalog match produces an abstention.
+
+This is a logical component overview; API and worker modules do not each imply a separate deployed service. See [Architecture and security boundaries](docs/ARCHITECTURE.md) for the detailed request flows and production topology.
 
 ## Run locally
 

@@ -1,5 +1,9 @@
 # Implementation architecture
 
+![Enterprise RAG with structured ingestion, parse caching, authorized catalog routing, tenant retrieval, and local inference](assets/architecture.svg)
+
+The diagram shows logical components, including modules within the API and worker. Its structured-ingestion and routing paths are detailed in [Structured ingestion and routing](STRUCTURED_RETRIEVAL.md).
+
 Browser React → HAProxy TLS → FastAPI BFF/API. The API authenticates the caller, checks tenant membership, role, and ACL, then reads metadata through the `rag_app` role. The cookie holds an opaque token; only the token hash is stored in the database. Cookie-authenticated mutations require CSRF and an Origin check. The OIDC authorization code uses PKCE S256, a signed state cookie, a nonce, issuer, audience, RS256, and an assurance level. The API does not trust tenant roles or groups from the token. Membership is provisioned locally and checked on every request. There is no tenant self-registration.
 
 API upload → immutable file → metadata, version, and job in one PostgreSQL transaction → worker claim with SKIP LOCKED → antivirus and checksum → parser subprocess → private LightRAG runtime → Ollama gateway → tenant PostgreSQL. The worker heartbeat extends the lease. Each attempt gets a new workspace. Publication uses the lease token and active-version CAS. A late attempt cannot replace the active index. Leftover attempt data is purged after the runtime hard timeout. Retries use backoff, then a dead letter and an explicit admin retry.
